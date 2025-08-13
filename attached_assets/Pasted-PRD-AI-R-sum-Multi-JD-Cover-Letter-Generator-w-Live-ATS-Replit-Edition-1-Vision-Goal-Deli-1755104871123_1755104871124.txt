@@ -1,0 +1,530 @@
+PRD — AI Résumé + Multi-JD Cover Letter Generator w/ Live ATS (Replit Edition)
+1) Vision & Goal
+Deliver a web app that:
+
+(1) Builds ATS-safe résumés with a live, on-type ATS score,
+
+(2) Generates tailored cover letters for multiple JDs in one go, and
+
+(3) Runs on Replit with OSS stacks only (OpenAI API is the sole paid piece).
+
+2) Target KPIs
+First draft résumé created in <10 min.
+
+Cover letter generation per JD in <30 sec (streamed).
+
+Live ATS latency <300 ms for local checks, <1.2 s for AI-assisted suggestions.
+
+3) In-Scope (v1)
+Rich résumé editor (schema-driven).
+
+Live ATS panel: keyword match, relevancy, formatting, quantification, readability, with suggestions.
+
+Upload N JDs (≤20) → N tailored cover letters (batch + ZIP).
+
+Export: PDF (ATS-safe), Markdown, JSON schema.
+
+Data privacy: local storage first; optional signup.
+
+4) Out-of-Scope (v1)
+Job scraping / auto-apply.
+
+Team collaboration.
+
+Architecture (Replit-Friendly, OSS)
+Single Repo Monoservice (keep it simple for Replit):
+
+Frontend: React + Vite + Tailwind (OSS).
+
+Backend: Node.js + Express (OSS), WebSocket (ws) for live ATS streaming.
+
+AI Orchestration: Node server talks to OpenAI (text + embeddings).
+
+NLP/Rules (local): JS libs — natural (stemming/TF-IDF), text-readability, wink-nlp, pluralize, simple regexes.
+
+Data:
+
+Default: SQLite (file) via Prisma (OSS).
+
+Vector search: store embedding arrays in SQLite as JSON; cosine sim in JS (fast enough at v1 scale).
+
+PDF: pdfmake (pure JS, OSS) → ATS-friendly PDFs.
+
+Queue/Jobs: lightweight SQLite job table + in-process worker (no Redis).
+
+Auth (optional): Lucia (OSS) or simple session JWT cookies.
+
+Why this stack? Zero external infra, works inside Replit’s container, all OSS. No Redis, no Postgres hosting, no headless Chrome drama.
+
+Repo Layout
+bash
+Copy
+Edit
+/app
+  /client
+    /src
+      /components
+      /pages
+      /state
+      main.tsx
+      vite-env.d.ts
+    index.html
+    package.json
+    tailwind.config.js
+  /server
+    /src
+      index.ts
+      routes/
+        ats.ts
+        jds.ts
+        resume.ts
+        covers.ts
+      services/
+        openai.ts
+        atsEngine.ts
+        jdParser.ts
+        pdf.ts
+        vector.ts
+        jobs.ts
+      db/
+        prisma.ts
+        schema.prisma
+    package.json
+  package.json (workspace)
+  replit.nix
+  .replit
+  README.md
+replit.nix (Node 18 + build tools):
+
+nix
+Copy
+Edit
+{ pkgs }: {
+  deps = [
+    pkgs.nodejs_18
+    pkgs.python3
+    pkgs.pkg-config
+    pkgs.openssl
+  ];
+}
+.replit:
+
+ini
+Copy
+Edit
+run = "npm run dev"
+Root package.json (workspaces):
+
+json
+Copy
+Edit
+{
+  "name": "live-ats-suite",
+  "private": true,
+  "workspaces": ["app/client", "app/server"],
+  "scripts": {
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm --prefix app/server run dev",
+    "dev:client": "npm --prefix app/client run dev",
+    "postinstall": "npm --prefix app/client i && npm --prefix app/server i && npm --prefix app/server run prisma:generate"
+  },
+  "devDependencies": { "concurrently": "^9.0.0" }
+}
+Data Model (Prisma + SQLite)
+prisma
+Copy
+Edit
+// app/server/src/db/schema.prisma
+datasource db { provider = "sqlite"; url = "file:./data.db" }
+generator client { provider = "prisma-client-js" }
+
+model User {
+  id        String  @id @default(cuid())
+  email     String? @unique
+  name      String?
+  createdAt DateTime @default(now())
+  resumes   Resume[]
+  jds       JD[]
+}
+
+model Resume {
+  id         String @id @default(cuid())
+  userId     String
+  title      String
+  json       Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User @relation(fields: [userId], references: [id])
+  scores     ATSScore[]
+  letters    CoverLetter[]
+}
+
+model JD {
+  id         String @id @default(cuid())
+  userId     String
+  title      String
+  sourceName String?
+  parsed     Json
+  embedding  Json // number[]
+  createdAt  DateTime @default(now())
+  user       User @relation(fields: [userId], references: [id])
+  scores     ATSScore[]
+  letters    CoverLetter[]
+}
+
+model ATSScore {
+  id         String @id @default(cuid())
+  resumeId   String
+  jdId       String
+  overall    Int
+  breakdown  Json
+  suggestions Json
+  updatedAt  DateTime @updatedAt
+  resume     Resume @relation(fields: [resumeId], references: [id])
+  jd         JD     @relation(fields: [jdId], references: [id])
+}
+
+model CoverLetter {
+  id         String @id @default(cuid())
+  userId     String
+  resumeId   String
+  jdId       String
+  tone       String
+  contentMd  String
+  version    Int     @default(1)
+  createdAt  DateTime @default(now())
+  user       User   @relation(fields: [userId], references: [id])
+  resume     Resume @relation(fields: [resumeId], references: [id])
+  jd         JD     @relation(fields: [jdId], references: [id])
+}
+
+model Job {
+  id         String @id @default(cuid())
+  type       String
+  payload    Json
+  status     String  @default("pending") // pending|running|done|error
+  artifacts  Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+API Surface (Express)
+POST /api/jds — upload JD text/PDF; parse → { jdId }.
+
+GET /api/jds/:id — parsed JSON, top skills, responsibilities.
+
+POST /api/ats/score — { resumeId, jdId } → stream partial scores via WebSocket channel ats:<resumeId>:<jdId>.
+
+POST /api/covers/batch — { resumeId, jdIds[], tone, length } → { jobId }.
+
+GET /api/jobs/:jobId — status + artifact links.
+
+POST /api/resumes — create/update résumé JSON.
+
+GET /api/resumes/:id — fetch résumé JSON.
+
+POST /api/export/zip — ZIP of PDFs.
+
+Live ATS — Scoring Signals (Local-First)
+Weights (sum=100):
+
+Keyword Coverage (0–40) — exact, stem, synonyms; JD must-have ×2.
+
+Relevancy (0–25) — cosine sim between JD responsibilities vs. résumé summary+exp.
+
+Use OpenAI embeddings (paid) OR fallback TF-IDF (OSS) when API off.
+
+Quantification (0–15) — bullets w/ metrics (%, $, #, “X users”).
+
+Formatting (0–10) — headings, no tables, parsable bullets, standard fonts.
+
+Readability (0–10) — text-readability banded.
+
+UX: debounce 300–500 ms; local rules instant; if embeddings enabled, stream final blended score.
+
+Cover Letters — Multi-JD Batch (Grounded)
+Input: resume.json, jd.parsed[], tone, length.
+
+Pipeline:
+
+Extract JD skills/responsibilities → map to résumé bullets (string match + stems).
+
+Pick top 3–4 quantified wins aligned with JD.
+
+OpenAI call with strict grounding: pass résumé JSON + JD parsed and forbid fabrication.
+
+Post-lint: remove clichés, ensure keywords naturally appear; wrap to specified length.
+
+Store as Markdown; render PDF via pdfmake.
+
+Prompts (Compact & Agent-Proof)
+System (Résumé & ATS Helper):
+
+You optimize résumés and generate cover letters strictly using provided résumé JSON and parsed job descriptions. Never invent employers, titles, or metrics. If evidence is missing, propose a conservative phrasing.
+
+Cover Letter Template Variables:
+
+{company}, {role}, {tone}, {word_count}, {jd_keywords[3]}, {achievement_snippets[3]}.
+
+Few-shot strategy: 1–2 examples included in code with different JD patterns (backend vs. intern).
+
+Security & Privacy (OSS-Compliant)
+No third-party DB SaaS. Data stays in SQLite file.
+
+.env only holds OPENAI_API_KEY.
+
+Export/delete endpoints; local-first mode works without account.
+
+Rate limit: express-rate-limit on generation endpoints.
+
+OSS Stack Summary
+React + Vite + Tailwind (MIT)
+
+Express (MIT), ws (MIT), Prisma (Apache-2.0), SQLite (Public domain)
+
+pdfmake (MIT) for PDFs
+
+natural, wink-nlp, text-readability, pluralize (all OSS)
+
+OpenAI Node SDK (MIT) — paid API only
+
+Lucia (MIT) for auth (optional)
+
+User Flows (Mermaid)
+mermaid
+Copy
+Edit
+flowchart LR
+A[Open App] --> B[Create/Import Resume JSON]
+B --> C[Upload Multiple JDs]
+C --> D[Live ATS Score Updates]
+D --> E[Apply Suggestions / Rewrite Bullets]
+E --> F[Generate Cover Letters (Batch)]
+F --> G[Export PDFs / ZIP]
+G --> H[Iterate / Track Scores]
+mermaid
+Copy
+Edit
+sequenceDiagram
+participant FE as Frontend
+participant BE as Express API
+participant ATS as ATS Engine (Local)
+participant OA as OpenAI
+FE->>BE: save resume delta
+FE->>BE: request ATS score (resumeId, jdId)
+BE->>ATS: compute local rules (keywords, format, readability)
+ATS-->>BE: partial scores
+BE-->>FE: WS event partial
+alt embeddings on
+  BE->>OA: embed resume & JD
+  OA-->>BE: vectors
+  BE->>ATS: cosine relevancy
+  ATS-->>BE: final blended
+  BE-->>FE: WS event final
+end
+ASCII Wires
+Dashboard
+
+less
+Copy
+Edit
++--------------------------------------------------------------+
+|  Resumes  |  JDs  |  Letters  |  Export                      |
++--------------------------------------------------------------+
+| + New Resume            | + Upload JD (PDF/TXT)              |
+| Resume A [Edit]         | JD1: Backend Eng @ Acme [View]     |
+| Resume B [Edit]         | JD2: SDE Intern @ Amber [View]     |
++--------------------------------------------------------------+
+| Base Resume: A  | [ ] JD1 [ ] JD2 [ ] JD3   (Generate ▶)     |
++--------------------------------------------------------------+
+Editor + Live ATS
+
+yaml
+Copy
+Edit
++-------------------------+  +-------------------------------+
+| Résumé Editor           |  | Live ATS: 78/100             |
+| [ Summary ]             |  | Keywords  : 26/32 (▲)        |
+| [ Experience ]          |  | Relevancy : 18/25            |
+| [ Projects ]            |  | Quantify  : 10/15            |
+| [ Skills ]              |  | Format    :  8/10            |
+|                         |  | Readability: 6/10            |
+| • Built X... [Rewrite]  |  | Fixes: Add "Redis" in Skills |
++-------------------------+  +-------------------------------+
+Batch Letters
+
+less
+Copy
+Edit
++--------------------------------------------------------------+
+| Base: Resume A  | Tone: Formal | Length: 250 words          |
++--------------------------------------------------------------+
+| [x] JD1: Acme Backend    Status: Pending                     |
+| [x] JD2: Globex Platform Status: Pending                     |
+| [ ] JD3: Umbrella SWE    Status: -                           |
++--------------------------------------------------------------+
+|             [ Generate All ]   [ Download ZIP ]              |
++--------------------------------------------------------------+
+Implementation Checklists
+Backend (Express)
+Env: OPENAI_API_KEY.
+
+Prisma: run prisma generate && prisma migrate dev --name init.
+
+JD Parser:
+
+PDF → text via pdf-parse (OSS).
+
+Extract title, responsibilities, requirements, skills with regex + natural NER-ish heuristics.
+
+Embeddings (flag USE_EMBEDDINGS=true/false):
+
+If true: call OpenAI embeddings; else TF-IDF vectors (OSS fallback).
+
+ATS Engine:
+
+Keyword coverage: stemmed match; synonyms map (JSON).
+
+Readability: text-readability.
+
+Formatting: lint résumé JSON (no tables, bullet length bands).
+
+Quantification: regex for %, $, numbers, “users”.
+
+WS Streaming:
+
+Channel ats:<resumeId>:<jdId> emits {partial:true,...} then {final:true,...}.
+
+Cover Letters:
+
+Map JD → résumé bullets; pass snippets + JD into OpenAI.
+
+Post-process; store Markdown; render PDF via pdfmake.
+
+ZIP Export: archiver (OSS).
+
+Frontend (React + Vite)
+State: Zustand for editor/resume JSON.
+
+Editor: simple controlled inputs + bullet chips + “Rewrite” button.
+
+ATS Panel: subscribes to WS; renders live bars + fix buttons (apply to skills/bullets).
+
+JD Upload: drag-drop; list cards with parsed fields.
+
+Batch Screen: select base résumé + JDs; show progress per JD; download ZIP.
+
+Sample Code Skeletons
+Server bootstrap (app/server/src/index.ts)
+
+ts
+Copy
+Edit
+import express from "express";
+import { WebSocketServer } from "ws";
+import cors from "cors";
+import dotenv from "dotenv";
+import { router as atsRouter } from "./routes/ats";
+import { router as jdsRouter } from "./routes/jds";
+import { router as resumeRouter } from "./routes/resume";
+import { router as coversRouter } from "./routes/covers";
+
+dotenv.config();
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "2mb" }));
+
+app.use("/api/ats", atsRouter);
+app.use("/api/jds", jdsRouter);
+app.use("/api/resumes", resumeRouter);
+app.use("/api/covers", coversRouter);
+
+const server = app.listen(3000, () => console.log("API on :3000"));
+const wss = new WebSocketServer({ server });
+
+export const wsHub = {
+  emit: (channel: string, data: any) => {
+    const payload = JSON.stringify({ channel, data });
+    wss.clients.forEach(c => c.readyState === 1 && c.send(payload));
+  }
+};
+ATS Engine (essence) (app/server/src/services/atsEngine.ts)
+
+ts
+Copy
+Edit
+import { PorterStemmer, TfIdf, NGrams } from "natural";
+import { textStandard } from "text-readability";
+
+export function computeLocalATS(resumeText: string, jdText: string) {
+  const score = { keywords: 0, relevancy: 0, quantify: 0, formatting: 10, readability: 0 };
+  // keywords: stemmed exact/synonym match
+  // quantify: regex for metrics
+  // readability: banded from textStandard
+  // ...implement simple, fast rules; return breakdown + suggestions[]
+  return { overall: 78, breakdown: score, suggestions: ["Add Redis in Skills"] };
+}
+Cover Letter Orchestrator (outline) (app/server/src/services/openai.ts)
+
+ts
+Copy
+Edit
+import OpenAI from "openai";
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+
+export async function generateCoverLetter({ resume, jd, tone, length }: any) {
+  const sys = "You write tailored cover letters using only provided resume JSON and JD. No fabrication.";
+  const user = JSON.stringify({ resume, jd, tone, length });
+  const res = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.4,
+    messages: [{ role: "system", content: sys }, { role: "user", content: user }]
+  });
+  return res.choices[0].message?.content ?? "";
+}
+Client WS Listener (core) (app/client/src/state/ats.ts)
+
+ts
+Copy
+Edit
+export function subscribeATS(onUpdate: (msg:any)=>void){
+  const ws = new WebSocket(`ws://${location.host}`);
+  ws.onmessage = (ev)=> {
+    const { channel, data } = JSON.parse(ev.data);
+    if(channel.startsWith("ats:")) onUpdate(data);
+  };
+  return ()=> ws.close();
+}
+PDF Template (ATS-Safe, pdfmake)
+Single column, standard fonts, clear headings, no tables.
+
+Bullet style: • with 12–28 words, action-led.
+
+Testing & Telemetry (OSS)
+Unit: Vitest on scoring functions.
+
+E2E: Playwright (optional).
+
+Logging: pino (OSS).
+
+Metrics: simple /metrics JSON; visualize with a small chart in FE.
+
+Developer Scripts
+Install: npm i (root will install client/server + prisma).
+
+Dev: npm run dev → runs server :3000 + client :5173.
+
+DB: npm --prefix app/server run prisma:migrate
+
+Build PDFs: none needed (runtime pdfmake).
+
+Env: create .env with OPENAI_API_KEY=....
+
+Risk Controls (v1)
+No embeddings fallback: TF-IDF mode still gives decent relevancy.
+
+Puppeteer avoidance: pdfmake keeps things lightweight on Replit.
+
+No Redis: in-process worker + SQLite job table avoids infra drag.
+
+Licensing
+Ship under MIT. Include THIRD_PARTY_NOTICES for libs.
