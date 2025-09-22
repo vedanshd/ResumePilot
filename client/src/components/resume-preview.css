@@ -1,0 +1,42 @@
+/* Resume Preview Styles - Ensure all text is black for printing */
+
+/* Override gray text colors with black */
+.bg-white.shadow-lg h1,
+.bg-white.shadow-lg h2,
+.bg-white.shadow-lg h3,
+.bg-white.shadow-lg p,
+.bg-white.shadow-lg span,
+.bg-white.shadow-lg li,
+.bg-white.shadow-lg div {
+  color: #000 !important;
+}
+
+/* Specifically target gray-600 and gray-700 classes */
+.bg-white.shadow-lg .text-gray-600,
+.bg-white.shadow-lg .text-gray-700 {
+  color: #000 !important;
+}
+
+/* Ensure borders are black */
+.bg-white.shadow-lg .border-gray-800 {
+  border-color: #000 !important;
+}
+
+/* Print styles */
+@media print {
+  .bg-white.shadow-lg * {
+    color: #000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  
+  .bg-white.shadow-lg .border-b-2 {
+    border-bottom-color: #000 !important;
+  }
+}
+
+/* Ensure icons are visible but in black */
+.bg-white.shadow-lg svg {
+  color: #000 !important;
+  fill: #000 !important;
+}
