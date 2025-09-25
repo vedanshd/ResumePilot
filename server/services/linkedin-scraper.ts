@@ -48,90 +48,177 @@ interface LinkedInProfile {
 }
 
 /**
- * Enhanced mock LinkedIn data with specific profiles
+ * AI-powered LinkedIn data extraction using Gemini API
+ * This function can analyze any LinkedIn profile text and extract structured data
+ */
+async function extractLinkedInDataWithAI(linkedInText: string, profileUrl: string): Promise<LinkedInProfile> {
+  try {
+    // Import Gemini service
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+    if (!apiKey || apiKey === "default_key" || apiKey === "your_gemini_api_key_here") {
+      throw new Error("Gemini API key not configured for LinkedIn extraction");
+    }
+    
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    const extractionPrompt = `
+You are an expert LinkedIn profile analyzer. Extract structured data from the following LinkedIn profile text and return it as JSON.
+
+LinkedIn Profile Text:
+${linkedInText}
+
+Please extract and return ONLY a valid JSON object with this exact structure:
+{
+  "name": "Full Name",
+  "headline": "Professional headline/title",
+  "location": "City, State/Country",
+  "email": "email@domain.com or empty string if not found",
+  "phone": "phone number or empty string if not found", 
+  "summary": "Professional summary/about section (combine multiple paragraphs into one)",
+  "experience": [
+    {
+      "title": "Job Title",
+      "company": "Company Name",
+      "location": "Work Location",
+      "startDate": "Start Date (e.g., Jan 2020, 2020, etc.)",
+      "endDate": "End Date or Present",
+      "description": ["Achievement 1", "Achievement 2", "Achievement 3"]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Degree Type and Field",
+      "school": "Institution Name", 
+      "location": "School Location",
+      "graduation": "Graduation Date/Year",
+      "gpa": "GPA if mentioned or empty string"
+    }
+  ],
+  "skills": ["Skill1", "Skill2", "Skill3"],
+  "certifications": [
+    {
+      "name": "Certification Name",
+      "issuer": "Issuing Organization",
+      "date": "Issue Date/Year"
+    }
+  ]
+}
+
+Important guidelines:
+- Extract ALL experience entries, not just recent ones
+- Convert job descriptions to bullet points highlighting achievements with metrics when available
+- Include ALL skills mentioned, not just top ones
+- Preserve exact company names, school names, and locations
+- If information is missing, use empty string "" or empty array []
+- Focus on quantifiable achievements and impact
+- Return ONLY the JSON, no additional text or formatting
+`;
+
+    console.log("🤖 Using AI to extract LinkedIn profile data...");
+    const result = await model.generateContent(extractionPrompt);
+    const aiResponse = await result.response.text();
+    
+    // Parse the AI response as JSON
+    const cleanResponse = aiResponse.replace(/```json\s*|\s*```/g, '').trim();
+    const extractedData = JSON.parse(cleanResponse);
+    
+    // Validate and enhance the extracted data
+    const profile: LinkedInProfile = {
+      name: extractedData.name || "Professional Name",
+      headline: extractedData.headline || "Professional Title", 
+      location: extractedData.location || "Location",
+      email: extractedData.email || "",
+      phone: extractedData.phone || "",
+      linkedin: profileUrl,
+      github: "", // LinkedIn rarely has GitHub info, would need separate detection
+      summary: extractedData.summary || "Professional with extensive experience.",
+      experience: (extractedData.experience || []).map((exp: any) => ({
+        title: exp.title || "Position",
+        company: exp.company || "Company",
+        location: exp.location || "",
+        startDate: exp.startDate || "",
+        endDate: exp.endDate || "Present",
+        description: Array.isArray(exp.description) ? exp.description : 
+                    typeof exp.description === 'string' ? [exp.description] : 
+                    ["Responsibilities and achievements in this role"]
+      })),
+      education: (extractedData.education || []).map((edu: any) => ({
+        degree: edu.degree || "Degree",
+        school: edu.school || "Institution", 
+        location: edu.location || "",
+        graduation: edu.graduation || "",
+        gpa: edu.gpa || undefined
+      })),
+      skills: Array.isArray(extractedData.skills) ? extractedData.skills : [],
+      certifications: (extractedData.certifications || []).map((cert: any) => ({
+        name: cert.name || "",
+        issuer: cert.issuer || "",
+        date: cert.date || ""
+      }))
+    };
+    
+    console.log("✅ Successfully extracted LinkedIn data using AI");
+    return profile;
+    
+  } catch (error) {
+    console.error("AI extraction failed:", error);
+    // Fall back to basic extraction
+    return extractBasicDataFromText(linkedInText, profileUrl);
+  }
+}
+
+/**
+ * Basic fallback extraction from LinkedIn text
+ */
+function extractBasicDataFromText(text: string, profileUrl: string): LinkedInProfile {
+  // Extract basic information using regex patterns
+  const nameMatch = text.match(/^([A-Za-z\s]+)/m);
+  const locationMatch = text.match(/([A-Za-z\s,]+(?:India|USA|Canada|UK|Germany|France|Singapore|Australia))/i);
+  const emailMatch = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  const phoneMatch = text.match(/(\+?\d{1,3}[-.\s]?\d{3,4}[-.\s]?\d{3,4}[-.\s]?\d{3,4})/);
+  
+  // Extract skills from common keywords
+  const skillKeywords = [
+    'JavaScript', 'Python', 'Java', 'React', 'Node.js', 'AWS', 'Docker', 'Kubernetes',
+    'Supply Chain', 'Procurement', 'Strategic Sourcing', 'Project Management',
+    'Leadership', 'Team Management', 'Business Development', 'Sales', 'Marketing',
+    'Data Analysis', 'Machine Learning', 'AI', 'Cloud Computing', 'DevOps'
+  ];
+  
+  const extractedSkills = skillKeywords.filter(skill => 
+    text.toLowerCase().includes(skill.toLowerCase())
+  );
+  
+  const username = profileUrl.split('/in/')[1]?.split('/')[0] || 'professional';
+  
+  return {
+    name: nameMatch?.[1]?.trim() || "Professional Name",
+    headline: "Professional Title",
+    location: locationMatch?.[1]?.trim() || "Location", 
+    email: emailMatch?.[1] || `${username}@example.com`,
+    phone: phoneMatch?.[1] || "",
+    linkedin: profileUrl,
+    github: "",
+    summary: "Experienced professional with expertise in their field.",
+    experience: [],
+    education: [],
+    skills: extractedSkills,
+    certifications: []
+  };
+}
+
+/**
+ * Enhanced mock LinkedIn data that tries to be more generic
  * Returns customized data based on the LinkedIn URL
  */
 function getMockLinkedInData(url: string): LinkedInProfile {
   // Extract username from LinkedIn URL for personalization
   const username = url.split('/in/')[1]?.split('/')[0]?.toLowerCase() || 'john-doe';
   
-  // Special case for Vedansh Dhawan
-  if (username === 'vedansh-dhawan' || username === 'vedanshdhawan') {
-    return {
-      name: "Vedansh Dhawan",
-      headline: "Aspiring Software Engineer | Full-Stack Developer | AI/ML Enthusiast",
-      location: "Vellore, Tamil Nadu, India",
-      email: "vedanshd04@gmail.com",
-      phone: "+91 9599036305",
-      linkedin: url,
-      github: "github.com/vedansh-dhawan",
-      summary: "Aspiring software engineer with solid experience in full-stack development, AI/ML, and telecom systems. Proficient in Python, Java, C++, and React with hands-on project delivery using modern frameworks and APIs. Successfully interned at Ericsson, automating telecom diagnostics and improving system efficiency. Strong academic background with leadership and cross-functional collaboration experience.",
-      experience: [
-        {
-          title: "Software Intern",
-          company: "Ericsson",
-          location: "Noida, Uttar Pradesh, India",
-          startDate: "May 2024",
-          endDate: "July 2024",
-          description: [
-            "Developed Python-based automation scripts for network diagnostics, reducing manual effort by 40% and improving troubleshooting efficiency by 30%",
-            "Executed over 100 test cases for telecom software validation, improving system reliability and reducing critical bugs by 25%",
-            "Collaborated with cross-functional engineering teams to analyze and optimize mobile network protocols, resulting in 20% faster issue resolution",
-            "Enhanced Linux system administration workflows through scripting, increasing daily telecom task efficiency by 35%",
-            "Accelerated understanding of telecom architecture and network KPIs, contributing to 15% improvement in monitoring accuracy"
-          ]
-        }
-      ],
-      education: [
-        {
-          degree: "Bachelor of Computer Science",
-          school: "VIT Vellore",
-          location: "Vellore, Tamil Nadu",
-          graduation: "Expected 2026",
-          gpa: "9.13"
-        },
-        {
-          degree: "Senior Secondary Education",
-          school: "Delhi Public School, Gurgaon",
-          location: "Gurgaon, Haryana",
-          graduation: "2022",
-          gpa: "90%"
-        }
-      ],
-      skills: [
-        "Python", "Java", "C++", "C", "JavaScript", "TypeScript", "HTML", "CSS",
-        "React.js", "Express.js", "Tailwind CSS", "FastAPI",
-        "MySQL", "PostgreSQL", "Oracle Database", "MongoDB", "SQL", "PL/SQL",
-        "AWS", "EC2", "S3", "Git", "GitHub",
-        "Natural Language Processing", "Machine Learning", "OpenAI API",
-        "Agile", "Scrum", "Microsoft Office"
-      ],
-      certifications: [
-        {
-          name: "AWS Educate: Introduction to Cloud 101",
-          issuer: "Amazon Web Services",
-          date: "2024"
-        },
-        {
-          name: "Data Fundamentals",
-          issuer: "IBM SkillsBuild",
-          date: "2024"
-        },
-        {
-          name: "Microsoft Azure AI Essentials Professional Certificate",
-          issuer: "Microsoft and LinkedIn",
-          date: "2024"
-        },
-        {
-          name: "Prompt Engineering & Programming with OpenAI",
-          issuer: "Columbia+",
-          date: "2024"
-        }
-      ]
-    };
-  }
-  
-  // Default profile for other users
+  // Default profile for all users
   return {
     name: "John Smith",
     headline: "Senior Software Engineer | Full-Stack Developer | Cloud Architecture",
@@ -279,34 +366,67 @@ function convertToResumeJson(profile: LinkedInProfile): ResumeJson {
 }
 
 /**
+ * Process LinkedIn profile data (from pasted text or scraped content)
+ */
+export async function processLinkedInData(linkedInData: string, profileUrl: string): Promise<ResumeJson> {
+  try {
+    console.log("📝 Processing LinkedIn data with AI extraction...");
+    
+    // Check if we have substantial LinkedIn content to analyze
+    if (linkedInData && linkedInData.length > 200) {
+      console.log("🔍 LinkedIn content detected, using AI extraction");
+      const profileData = await extractLinkedInDataWithAI(linkedInData, profileUrl);
+      return convertToResumeJson(profileData);
+    } else {
+      console.log("⚠️ Insufficient LinkedIn content, using fallback");
+      throw new Error("Insufficient LinkedIn content for analysis");
+    }
+    
+  } catch (error) {
+    console.error("LinkedIn data processing error:", error);
+    
+    // Fallback to basic extraction if AI fails
+    const profileData = extractBasicDataFromText(linkedInData || "", profileUrl);
+    return convertToResumeJson(profileData);
+  }
+}
+
+/**
  * Main function to scrape LinkedIn profile and convert to resume
  */
-export async function scrapeLinkedInProfile(url: string): Promise<ResumeJson> {
+export async function scrapeLinkedInProfile(url: string, providedData?: string): Promise<ResumeJson> {
   try {
-    // Import the API-based scraper function
+    // If LinkedIn data is provided directly, process it with AI
+    if (providedData && providedData.length > 200) {
+      console.log("🎯 Using provided LinkedIn data for AI processing");
+      return await processLinkedInData(providedData, url);
+    }
+    
+    // Try API-based scraping first
     const { scrapeLinkedInProfile: scrapeWithAPI, getAvailableScrapingServices } = await import("./linkedin-scraper-api");
     
     // Log available services for debugging
     const availableServices = getAvailableScrapingServices();
     if (availableServices.length > 0) {
       console.log(`Available scraping services: ${availableServices.join(', ')}`);
+      
+      // Use the API-based scraper
+      const result = await scrapeWithAPI(url);
+      
+      // Validate the result has all required fields
+      if (result && result.personalInfo && result.experience && result.skills && result.summary) {
+        return result;
+      }
     } else {
-      console.log("No scraping API keys configured. Using mock data.");
+      console.log("No scraping API keys configured.");
     }
     
-    // Use the API-based scraper
-    const result = await scrapeWithAPI(url);
+    throw new Error("API scraping not available or failed");
     
-    // Validate the result has all required fields
-    if (!result || !result.personalInfo || !result.experience || !result.skills || !result.summary) {
-      throw new Error("Invalid or incomplete data from scraper");
-    }
-    
-    return result;
   } catch (error) {
     console.error("LinkedIn scraping error:", error);
     
-    // Fallback to mock data if API scraping fails
+    // Fallback to mock data
     console.log("Using fallback mock data");
     const profileData = getMockLinkedInData(url);
     const resumeJson = convertToResumeJson(profileData);

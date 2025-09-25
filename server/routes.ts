@@ -100,10 +100,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   });
 
-  // LinkedIn scraping route with rate limiting and enhanced error handling
+  // LinkedIn processing route with rate limiting and enhanced error handling
   app.post("/api/linkedin/scrape", linkedInRateLimiter, async (req, res) => {
     try {
-      const { url } = req.body;
+      const { url, linkedinData } = req.body;
       
       // Input validation
       if (!url || typeof url !== 'string') {
@@ -113,27 +113,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
-      // URL format validation
-      const linkedInUrlPattern = /^https?:\/\/(www\.)?linkedin\.com\/in\/[a-zA-Z0-9-]+\/?$/;
-      if (!linkedInUrlPattern.test(url)) {
+      // URL format validation (relaxed for flexibility)
+      if (!url.includes('linkedin.com')) {
         return res.status(400).json({ 
           error: "Invalid LinkedIn URL format",
-          details: "URL should be in format: https://www.linkedin.com/in/username" 
+          details: "URL should be a LinkedIn profile URL" 
         });
       }
       
-      // Log the scraping attempt (for monitoring)
-      console.log(`LinkedIn scraping attempt from IP: ${req.ip} for URL: ${url}`);
+      // Log the processing attempt (for monitoring)
+      const processingMethod = linkedinData ? 'AI extraction from provided data' : 'URL scraping';
+      console.log(`LinkedIn processing attempt from IP: ${req.ip} for URL: ${url} using: ${processingMethod}`);
       
-      // Set a timeout for the scraping operation
-      const scrapeTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Scraping timeout')), 45000)
+      // Set a timeout for the processing operation
+      const processTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Processing timeout')), 45000)
       );
       
-      // Scrape LinkedIn profile with timeout
+      // Process LinkedIn profile with timeout
       const resumeData = await Promise.race([
-        scrapeLinkedInProfile(url),
-        scrapeTimeout
+        scrapeLinkedInProfile(url, linkedinData),
+        processTimeout
       ]);
       
       // Success response

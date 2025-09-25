@@ -31,8 +31,9 @@ export function ResumeEditor() {
   });
 
   const [resumeData, setResumeData] = useState<any>(null);
-  const [entryMode, setEntryMode] = useState<'manual' | 'linkedin'>('manual'); // Radio button state
+  const [entryMode, setEntryMode] = useState<'manual' | 'linkedin' | 'linkedin-paste'>('manual'); // Radio button state
   const [linkedInUrl, setLinkedInUrl] = useState("");
+  const [linkedInData, setLinkedInData] = useState("");
   const [isScraping, setIsScraping] = useState(false);
   const [isImporting, setIsImporting] = useState(false); // Flag to disable auto-save during import
   const [showPreview, setShowPreview] = useState(false);
@@ -212,12 +213,12 @@ export function ResumeEditor() {
     });
   };
 
-  // LinkedIn scraping mutation
+  // LinkedIn processing mutation (handles both URL scraping and data pasting)
   const scrapeLinkedInMutation = useMutation({
-    mutationFn: async (url: string) => {
+    mutationFn: async ({ url, linkedinData }: { url: string; linkedinData?: string }) => {
       setIsScraping(true);
       setIsImporting(true);
-      const response = await apiRequest("POST", "/api/linkedin/scrape", { url });
+      const response = await apiRequest("POST", "/api/linkedin/scrape", { url, linkedinData });
       return await response.json();
     },
     onSuccess: (response) => {
@@ -285,26 +286,52 @@ export function ResumeEditor() {
   });
 
   const handleLinkedInImport = () => {
-    if (!linkedInUrl.trim()) {
-      toast({
-        title: "URL Required",
-        description: "Please enter a LinkedIn profile URL.",
-        variant: "destructive",
-      });
-      return;
-    }
+    if (entryMode === 'linkedin-paste') {
+      // Handle pasted LinkedIn data
+      if (!linkedInData.trim()) {
+        toast({
+          title: "LinkedIn Data Required",
+          description: "Please paste your LinkedIn profile content.",
+          variant: "destructive",
+        });
+        return;
+      }
+      
+      if (linkedInData.length < 100) {
+        toast({
+          title: "Insufficient Data",
+          description: "Please paste more complete LinkedIn profile content.",
+          variant: "destructive",
+        });
+        return;
+      }
+      
+      // Use a generic LinkedIn URL for processing
+      const genericUrl = "https://www.linkedin.com/in/user-profile";
+      scrapeLinkedInMutation.mutate({ url: genericUrl, linkedinData: linkedInData });
+    } else {
+      // Handle URL-based import
+      if (!linkedInUrl.trim()) {
+        toast({
+          title: "URL Required",
+          description: "Please enter a LinkedIn profile URL.",
+          variant: "destructive",
+        });
+        return;
+      }
 
-    // Basic LinkedIn URL validation
-    if (!linkedInUrl.includes("linkedin.com/in/")) {
-      toast({
-        title: "Invalid URL",
-        description: "Please enter a valid LinkedIn profile URL.",
-        variant: "destructive",
-      });
-      return;
-    }
+      // Basic LinkedIn URL validation
+      if (!linkedInUrl.includes("linkedin.com")) {
+        toast({
+          title: "Invalid URL",
+          description: "Please enter a valid LinkedIn profile URL.",
+          variant: "destructive",
+        });
+        return;
+      }
 
-    scrapeLinkedInMutation.mutate(linkedInUrl);
+      scrapeLinkedInMutation.mutate({ url: linkedInUrl });
+    }
   };
 
 
@@ -431,7 +458,7 @@ export function ResumeEditor() {
           
           <RadioGroup 
             value={entryMode} 
-            onValueChange={(value) => setEntryMode(value as 'manual' | 'linkedin')}
+            onValueChange={(value) => setEntryMode(value as 'manual' | 'linkedin' | 'linkedin-paste')}
             className="space-y-4"
           >
             <div className="flex items-start space-x-3">
@@ -452,7 +479,7 @@ export function ResumeEditor() {
               <div className="flex-1">
                 <Label htmlFor="linkedin-entry" className="flex items-center cursor-pointer">
                   <Linkedin className="w-4 h-4 mr-2" style={{ color: colors.primary }} />
-                  <span className="font-medium" style={{ color: colors.foreground }}>Import from LinkedIn</span>
+                  <span className="font-medium" style={{ color: colors.foreground }}>Import from LinkedIn URL</span>
                   {hasImportedFromLinkedIn && (
                     <Badge 
                       className="ml-2"
@@ -468,7 +495,31 @@ export function ResumeEditor() {
                   )}
                 </Label>
                 <p className="text-sm mt-1" style={{ color: colors.mutedForeground }}>
-                  Automatically import your professional data from LinkedIn
+                  Automatically import your professional data from LinkedIn URL
+                </p>
+              </div>
+            </div>
+            
+            <div className="flex items-start space-x-3">
+              <RadioGroupItem value="linkedin-paste" id="linkedin-paste-entry" />
+              <div className="flex-1">
+                <Label htmlFor="linkedin-paste-entry" className="flex items-center cursor-pointer">
+                  <FileText className="w-4 h-4 mr-2" style={{ color: colors.primary }} />
+                  <span className="font-medium" style={{ color: colors.foreground }}>Paste LinkedIn Data</span>
+                  <Badge 
+                    className="ml-2"
+                    variant="outline"
+                    style={{ 
+                      backgroundColor: colors.accent + '20',
+                      color: colors.accent,
+                      borderColor: colors.accent
+                    }}
+                  >
+                    AI Powered
+                  </Badge>
+                </Label>
+                <p className="text-sm mt-1" style={{ color: colors.mutedForeground }}>
+                  Paste your LinkedIn profile text and let AI extract the data
                 </p>
               </div>
             </div>
@@ -539,6 +590,79 @@ export function ResumeEditor() {
                     <li>The preview will automatically open showing your formatted resume</li>
                     <li>You can then export it as a PDF directly from the preview</li>
                     <li>All manual entries will be replaced with LinkedIn data</li>
+                  </ul>
+                </div>
+              </div>
+            </motion.div>
+          )}
+          
+          {/* LinkedIn Data Paste Section - Only show when paste mode is selected */}
+          {entryMode === 'linkedin-paste' && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <div className="space-y-4">
+                <div className="flex items-start space-x-2">
+                  <FileText className="w-5 h-5 mt-2" style={{ color: colors.mutedForeground }} />
+                  <div className="flex-1">
+                    <textarea
+                      placeholder="Paste your LinkedIn profile content here (name, headline, experience, education, skills, etc.)..."
+                      value={linkedInData}
+                      onChange={(e) => setLinkedInData(e.target.value)}
+                      disabled={isScraping}
+                      rows={8}
+                      className="w-full p-3 rounded-md border resize-none"
+                      style={{ 
+                        backgroundColor: colors.background,
+                        color: colors.foreground,
+                        borderColor: colors.border
+                      }}
+                    />
+                    <p className="text-xs mt-1" style={{ color: colors.mutedForeground }}>
+                      Copy your LinkedIn profile content and paste it here. AI will extract and structure the data automatically.
+                    </p>
+                  </div>
+                </div>
+                
+                <Button
+                  onClick={handleLinkedInImport}
+                  disabled={isScraping || linkedInData.trim().length < 100}
+                  className="w-full"
+                  style={{ 
+                    backgroundColor: colors.primary,
+                    color: colors.primaryForeground
+                  }}
+                >
+                  {isScraping ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Processing with AI...
+                    </>
+                  ) : (
+                    <>
+                      <FileText className="w-4 h-4 mr-2" />
+                      Extract Data with AI
+                    </>
+                  )}
+                </Button>
+                
+                <div 
+                  className="text-sm p-3 rounded-lg"
+                  style={{ 
+                    backgroundColor: colors.muted,
+                    color: colors.mutedForeground
+                  }}
+                >
+                  <p className="font-medium mb-1">How AI extraction works:</p>
+                  <ul className="list-disc list-inside space-y-1 text-xs">
+                    <li>Paste your LinkedIn profile text (copy from your LinkedIn page)</li>
+                    <li>AI will intelligently extract name, experience, skills, education, etc.</li>
+                    <li>Extracted data is automatically structured into resume format</li>
+                    <li>Works with any LinkedIn profile content regardless of format</li>
+                    <li>Preview will open automatically after processing</li>
                   </ul>
                 </div>
               </div>

@@ -51,14 +51,14 @@ interface LinkedInProfile {
 // Configuration for different scraping services
 const SCRAPING_SERVICES = {
   scrapingdog: {
-    url: 'https://api.scrapingdog.com/scrape',
-    apiKey: process.env.SCRAPINGDOG_API_KEY || '',
-    enabled: !!process.env.SCRAPINGDOG_API_KEY
+    enabled: !!process.env.SCRAPINGDOG_API_KEY,
+    apiKey: process.env.SCRAPINGDOG_API_KEY!,
+    url: 'https://api.scrapingdog.com/linkedin' // Use dedicated LinkedIn API
   },
   brightdata: {
-    url: 'https://api.brightdata.com/dca/dataset',
-    apiKey: process.env.BRIGHTDATA_API_KEY || '',
-    enabled: !!process.env.BRIGHTDATA_API_KEY
+    enabled: true, // Enable Bright Data with hardcoded key for testing
+    apiKey: 'e87597c9eb6cb50ff55329f2009ec4383056612f38af8a45655430b8ca7fae59',
+    url: 'https://api.brightdata.com'
   },
   scraperapi: {
     url: 'https://api.scraperapi.com',
@@ -77,41 +77,89 @@ async function scrapeWithScrapingDog(url: string): Promise<LinkedInProfile | nul
   }
 
   try {
-    console.log("🔍 Making request to ScrapingDog API...");
+    console.log("🔍 Making request to ScrapingDog LinkedIn API...");
+    
+    // Extract LinkedIn profile ID from URL
+    // URLs like https://www.linkedin.com/in/anandk0040/ -> anandk0040
+    const profileIdMatch = url.match(/linkedin\.com\/in\/([^\/]+)/);
+    if (!profileIdMatch) {
+      console.log("❌ Could not extract LinkedIn profile ID from URL:", url);
+      return null;
+    }
+    
+    const linkId = profileIdMatch[1];
+    console.log("🔍 Extracted LinkedIn profile ID:", linkId);
+    
     const response = await axios.get(SCRAPING_SERVICES.scrapingdog.url, {
       params: {
         api_key: SCRAPING_SERVICES.scrapingdog.apiKey,
-        url: url,
-        dynamic: 'true', // Enable JavaScript rendering
-        premium: 'true', // Use premium proxies for LinkedIn
+        type: 'profile',
+        linkId: linkId,
+        premium: 'true' // Enable premium mode for protected profiles
       },
       timeout: 30000
     });
 
     console.log("✅ ScrapingDog API response received");
     
-    // Parse the HTML response and extract structured data
-    const html = response.data;
+    const responseData = response.data;
     
-    // Check if we got valid HTML
-    if (!html || typeof html !== 'string') {
-      console.log("⚠️ Invalid HTML response from ScrapingDog, using fallback");
-      return null;
+    // Debug: Log response type and structure
+    console.log(`📊 ScrapingDog response type: ${typeof responseData}`);
+    console.log("📊 ScrapingDog full response:", JSON.stringify(responseData, null, 2));
+    
+    // Check if we got structured JSON data (ScrapingDog LinkedIn API response)
+    if (Array.isArray(responseData) && responseData.length > 0) {
+      console.log("🎯 ScrapingDog returned structured LinkedIn JSON data");
+      return convertScrapingDogResponse(responseData[0], url);
     }
     
-    // Check if it's an error page or blocked content
-    if (html.includes('Request blocked') || html.includes('Access denied') || html.length < 1000) {
-      console.log("⚠️ ScrapingDog request was blocked or returned minimal content");
-      return null;
+    // Check if we got HTML response
+    if (typeof responseData === 'string') {
+      console.log("📄 ScrapingDog returned HTML content, parsing with AI");
+      
+      // Check if it's an error page or blocked content
+      if (responseData.includes('Request blocked') || responseData.includes('Access denied') || responseData.includes('Sign in to LinkedIn')) {
+        console.log("⚠️ ScrapingDog request was blocked or requires authentication");
+        return null;
+      }
+      
+      // Check if we have minimal content
+      if (responseData.length < 1000) {
+        console.log(`⚠️ ScrapingDog returned minimal content (${responseData.length} chars), likely blocked`);
+        return null;
+      }
+      
+      return await parseLinkedInHTML(responseData, url);
     }
     
-    return parseLinkedInHTML(html, url);
+        // Check if we got an object response (non-array JSON from ScrapingDog)
+    if (typeof responseData === 'object' && !Array.isArray(responseData) && responseData !== null) {
+      console.log("📋 ScrapingDog returned JSON object, converting to profile");
+      
+      // Check if it's an error response
+      if (responseData.message && !responseData.fullName && !responseData.name && !responseData.first_name) {
+        console.log("❌ ScrapingDog returned error response:", responseData.message);
+        return null;
+      }
+      
+      return convertScrapingDogResponse(responseData, url);
+    }
+    
+    console.log("⚠️ Unexpected response format from ScrapingDog");
+    return null;
+    
   } catch (error: any) {
     console.error("ScrapingDog API error:", error.message || error);
+    console.error("📊 Error response status:", error.response?.status);
+    console.error("📊 Error response data:", error.response?.data);
+    
     if (error.response?.status === 401) {
       console.error("❌ ScrapingDog API authentication failed - check your API key");
     } else if (error.response?.status === 429) {
       console.error("❌ ScrapingDog API rate limit exceeded");
+    } else if (error.response?.status === 400) {
+      console.error("❌ ScrapingDog API bad request - check parameters or profile ID");
     }
     return null;
   }
@@ -127,26 +175,42 @@ async function scrapeWithBrightData(url: string): Promise<LinkedInProfile | null
   }
 
   try {
-    // Bright Data provides structured data directly for LinkedIn
-    const response = await axios.post(
-      `${SCRAPING_SERVICES.brightdata.url}/trigger`,
-      {
-        url: url,
-        dataset_id: 'linkedin_profile'
-      },
+    console.log("🔍 Making request to Bright Data API...");
+    
+    // Extract profile ID from LinkedIn URL
+    const profileIdMatch = url.match(/linkedin\.com\/in\/([^\/\?]+)/);
+    if (!profileIdMatch) {
+      console.error("❌ Could not extract LinkedIn profile ID from URL");
+      return null;
+    }
+    const profileId = profileIdMatch[1];
+    console.log("🔍 Extracted LinkedIn profile ID:", profileId);
+
+    // Bright Data datasets API - check progress/trigger LinkedIn scraping
+    const response = await axios.get(
+      `${SCRAPING_SERVICES.brightdata.url}/datasets/v3/progress/`,
       {
         headers: {
           'Authorization': `Bearer ${SCRAPING_SERVICES.brightdata.apiKey}`,
-          'Content-Type': 'application/json'
+        },
+        params: {
+          url: url,
+          profile_id: profileId
         },
         timeout: 30000
       }
     );
 
+    console.log("✅ Bright Data API response received");
+    console.log("📊 Bright Data response type:", typeof response.data);
+    console.log("📊 Bright Data full response:", JSON.stringify(response.data, null, 2));
+
     // Convert Bright Data format to our format
     return convertBrightDataToProfile(response.data, url);
-  } catch (error) {
-    console.error("Bright Data API error:", error);
+  } catch (error: any) {
+    console.error("Bright Data API error:", error.message || error);
+    console.error("📊 Error response status:", error.response?.status);
+    console.error("📊 Error response data:", error.response?.data);
     return null;
   }
 }
@@ -173,7 +237,7 @@ async function scrapeWithScraperAPI(url: string): Promise<LinkedInProfile | null
 
     // Parse the HTML response
     const html = response.data;
-    return parseLinkedInHTML(html, url);
+    return await parseLinkedInHTML(html, url);
   } catch (error) {
     console.error("ScraperAPI error:", error);
     return null;
@@ -181,63 +245,391 @@ async function scrapeWithScraperAPI(url: string): Promise<LinkedInProfile | null
 }
 
 /**
- * Parse LinkedIn HTML to extract profile data
- * Enhanced parser for better data extraction
+ * Parse LinkedIn HTML to extract profile data using AI
+ * Uses the same AI extraction system as the paste feature
  */
-function parseLinkedInHTML(html: string, profileUrl: string): LinkedInProfile {
-  console.log("🔍 Parsing LinkedIn HTML for actual data extraction");
-  
-  // For demonstration, let's implement a basic parser
-  // In production, you would use cheerio for proper HTML parsing
+async function parseLinkedInHTML(html: string, profileUrl: string): Promise<LinkedInProfile> {
+  console.log("🔍 Parsing LinkedIn HTML with AI extraction");
   
   try {
-    // Check if html is actually a string
+    // Check if html is actually a string and has substantial content
     if (!html || typeof html !== 'string') {
       console.log("⚠️ HTML is not a string, using fallback data");
       throw new Error("Invalid HTML content");
     }
     
-    // Extract name from title or h1 tags
-    const nameMatch = html.match(/<title[^>]*>([^<|]+)/i) || 
-                     html.match(/<h1[^>]*class="[^"]*top-card[^"]*"[^>]*>([^<]+)/i);
-    const name = nameMatch ? nameMatch[1].trim() : "Professional Name";
-    
-    // Extract headline
-    const headlineMatch = html.match(/class="[^"]*headline[^"]*"[^>]*>([^<]+)/i);
-    const headline = headlineMatch ? headlineMatch[1].trim() : "Professional Title";
-    
-    // Extract location
-    const locationMatch = html.match(/class="[^"]*location[^"]*"[^>]*>([^<]+)/i);
-    const location = locationMatch ? locationMatch[1].trim() : "Location";
-    
-    // Extract summary/about
-    const aboutMatch = html.match(/class="[^"]*about[^"]*"[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i);
-    const summary = aboutMatch ? aboutMatch[1].replace(/<[^>]+>/g, '').trim() : 
-      "Experienced professional with expertise in technology and leadership.";
-    
-    // For now, return enhanced mock data that simulates parsed content
-    const username = profileUrl.split('/in/')[1]?.split('/')[0]?.toLowerCase() || 'professional';
-    
-    if (username === 'vedansh-dhawan' || username === 'vedanshdhawan') {
-      return getVedanshProfile(profileUrl);
+    // Check if we got blocked or minimal content
+    if (html.includes('Request blocked') || html.includes('Access denied') || html.length < 1000) {
+      console.log("⚠️ LinkedIn request was blocked or returned minimal content");
+      throw new Error("LinkedIn access blocked");
     }
     
-    return {
-      ...getDefaultProfile(profileUrl, username),
-      name: name.includes('LinkedIn') ? getDefaultProfile(profileUrl, username).name : name,
-      headline: headline.includes('LinkedIn') ? getDefaultProfile(profileUrl, username).headline : headline,
-      location: location.includes('LinkedIn') ? getDefaultProfile(profileUrl, username).location : location,
-      summary: summary.length > 50 ? summary : getDefaultProfile(profileUrl, username).summary
-    };
+    // Extract text content from HTML for AI processing
+    const textContent = extractTextFromHTML(html);
+    
+    // If we have substantial text content, use AI extraction
+    if (textContent && textContent.length > 500) {
+      console.log("🤖 Using AI extraction on scraped LinkedIn content");
+      return await extractLinkedInDataWithAI(textContent, profileUrl);
+    } else {
+      console.log("⚠️ Insufficient text content extracted from HTML");
+      throw new Error("Insufficient content for AI extraction");
+    }
     
   } catch (error) {
     console.error("Error parsing LinkedIn HTML:", error);
-    // Fall back to username-based mock data
+    
+    // Fall back to basic text extraction
+    const textContent = extractTextFromHTML(html || "");
+    if (textContent && textContent.length > 100) {
+      console.log("🔄 Falling back to basic text extraction");
+      return extractBasicDataFromText(textContent, profileUrl);
+    }
+    
+    // Final fallback to default profile
+    console.log("🔄 Using default profile as final fallback");
     const username = profileUrl.split('/in/')[1]?.split('/')[0]?.toLowerCase() || 'professional';
-    return username === 'vedansh-dhawan' || username === 'vedanshdhawan' 
-      ? getVedanshProfile(profileUrl)
-      : getDefaultProfile(profileUrl, username);
+    return getDefaultProfile(profileUrl, username);
   }
+}
+
+/**
+ * Extract text content from LinkedIn HTML
+ */
+function extractTextFromHTML(html: string): string {
+  if (!html) return "";
+  
+  try {
+    // Remove script and style elements
+    let cleanHtml = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+    cleanHtml = cleanHtml.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+    
+    // Remove HTML tags but preserve text content
+    let textContent = cleanHtml.replace(/<[^>]+>/g, ' ');
+    
+    // Clean up whitespace
+    textContent = textContent.replace(/\s+/g, ' ').trim();
+    
+    // Remove common non-content text
+    const cleanupPatterns = [
+      /Skip to main content/gi,
+      /Join now Sign in/gi,
+      /LinkedIn navigation/gi,
+      /Cookie Policy/gi,
+      /Privacy Policy/gi,
+      /User Agreement/gi
+    ];
+    
+    cleanupPatterns.forEach(pattern => {
+      textContent = textContent.replace(pattern, ' ');
+    });
+    
+    return textContent.trim();
+  } catch (error) {
+    console.error("Error extracting text from HTML:", error);
+    return "";
+  }
+}
+
+/**
+ * AI-powered LinkedIn data extraction (imported from main scraper)
+ */
+async function extractLinkedInDataWithAI(linkedInText: string, profileUrl: string): Promise<LinkedInProfile> {
+  try {
+    // Import Gemini service
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+    if (!apiKey || apiKey === "default_key" || apiKey === "your_gemini_api_key_here") {
+      throw new Error("Gemini API key not configured for LinkedIn extraction");
+    }
+    
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const extractionPrompt = `
+You are an expert LinkedIn profile analyzer. Extract structured data from the following LinkedIn profile text and return it as JSON.
+
+LinkedIn Profile Text:
+${linkedInText}
+
+Please extract and return ONLY a valid JSON object with this exact structure:
+{
+  "name": "Full Name",
+  "headline": "Professional headline/title",
+  "location": "City, State/Country",
+  "email": "email@domain.com or empty string if not found",
+  "phone": "phone number or empty string if not found", 
+  "summary": "Professional summary/about section (combine multiple paragraphs into one)",
+  "experience": [
+    {
+      "title": "Job Title",
+      "company": "Company Name",
+      "location": "Work Location",
+      "startDate": "Start Date (e.g., Jan 2020, 2020, etc.)",
+      "endDate": "End Date or Present",
+      "description": ["Achievement 1", "Achievement 2", "Achievement 3"]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Degree Type and Field",
+      "school": "Institution Name", 
+      "location": "School Location",
+      "graduation": "Graduation Date/Year",
+      "gpa": "GPA if mentioned or empty string"
+    }
+  ],
+  "skills": ["Skill1", "Skill2", "Skill3"],
+  "certifications": [
+    {
+      "name": "Certification Name",
+      "issuer": "Issuing Organization",
+      "date": "Issue Date/Year"
+    }
+  ]
+}
+
+Important guidelines:
+- Extract ALL experience entries, not just recent ones
+- Convert job descriptions to bullet points highlighting achievements with metrics when available
+- Include ALL skills mentioned, not just top ones
+- Preserve exact company names, school names, and locations
+- If information is missing, use empty string "" or empty array []
+- Focus on quantifiable achievements and impact
+- Return ONLY the JSON, no additional text or formatting
+`;
+
+    console.log("🤖 Using AI to extract LinkedIn profile data from scraped content...");
+    const result = await model.generateContent(extractionPrompt);
+    const aiResponse = await result.response.text();
+    
+    // Parse the AI response as JSON
+    const cleanResponse = aiResponse.replace(/```json\s*|\s*```/g, '').trim();
+    const extractedData = JSON.parse(cleanResponse);
+    
+    // Validate and enhance the extracted data
+    const profile: LinkedInProfile = {
+      name: extractedData.name || "Professional Name",
+      headline: extractedData.headline || "Professional Title", 
+      location: extractedData.location || "Location",
+      email: extractedData.email || "",
+      phone: extractedData.phone || "",
+      linkedin: profileUrl,
+      github: "", // LinkedIn rarely has GitHub info, would need separate detection
+      summary: extractedData.summary || "Professional with extensive experience.",
+      experience: (extractedData.experience || []).map((exp: any) => ({
+        title: exp.title || "Position",
+        company: exp.company || "Company",
+        location: exp.location || "",
+        startDate: exp.startDate || "",
+        endDate: exp.endDate || "Present",
+        description: Array.isArray(exp.description) ? exp.description : 
+                    typeof exp.description === 'string' ? [exp.description] : 
+                    ["Responsibilities and achievements in this role"]
+      })),
+      education: (extractedData.education || []).map((edu: any) => ({
+        degree: edu.degree || "Degree",
+        school: edu.school || "Institution", 
+        location: edu.location || "",
+        graduation: edu.graduation || "",
+        gpa: edu.gpa || undefined
+      })),
+      skills: Array.isArray(extractedData.skills) ? extractedData.skills : [],
+      certifications: (extractedData.certifications || []).map((cert: any) => ({
+        name: cert.name || "",
+        issuer: cert.issuer || "",
+        date: cert.date || ""
+      }))
+    };
+    
+    console.log("✅ Successfully extracted LinkedIn data using AI");
+    return profile;
+    
+  } catch (error) {
+    console.error("AI extraction failed:", error);
+    // Fall back to basic extraction
+    return extractBasicDataFromText(linkedInText, profileUrl);
+  }
+}
+
+/**
+ * Basic fallback extraction from LinkedIn text
+ */
+function extractBasicDataFromText(text: string, profileUrl: string): LinkedInProfile {
+  // Extract basic information using regex patterns
+  const nameMatch = text.match(/^([A-Za-z\s]+)/m);
+  const locationMatch = text.match(/([A-Za-z\s,]+(?:India|USA|Canada|UK|Germany|France|Singapore|Australia))/i);
+  const emailMatch = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  const phoneMatch = text.match(/(\+?\d{1,3}[-.\s]?\d{3,4}[-.\s]?\d{3,4}[-.\s]?\d{3,4})/);
+  
+  // Extract skills from common keywords
+  const skillKeywords = [
+    'JavaScript', 'Python', 'Java', 'React', 'Node.js', 'AWS', 'Docker', 'Kubernetes',
+    'Supply Chain', 'Procurement', 'Strategic Sourcing', 'Project Management',
+    'Leadership', 'Team Management', 'Business Development', 'Sales', 'Marketing',
+    'Data Analysis', 'Machine Learning', 'AI', 'Cloud Computing', 'DevOps'
+  ];
+  
+  const extractedSkills = skillKeywords.filter(skill => 
+    text.toLowerCase().includes(skill.toLowerCase())
+  );
+  
+  const username = profileUrl.split('/in/')[1]?.split('/')[0] || 'professional';
+  
+  return {
+    name: nameMatch?.[1]?.trim() || "Professional Name",
+    headline: "Professional Title",
+    location: locationMatch?.[1]?.trim() || "Location", 
+    email: emailMatch?.[1] || `${username}@example.com`,
+    phone: phoneMatch?.[1] || "",
+    linkedin: profileUrl,
+    github: "",
+    summary: "Experienced professional with expertise in their field.",
+    experience: [],
+    education: [],
+    skills: extractedSkills,
+    certifications: []
+  };
+}
+
+/**
+ * Convert ScrapingDog LinkedIn response to our profile format
+ */
+function convertScrapingDogResponse(data: any, profileUrl: string): LinkedInProfile {
+  console.log("🔄 Converting ScrapingDog response to LinkedIn profile format");
+  
+  try {
+    // Debug: Log the raw data structure
+    console.log("🔍 Raw ScrapingDog data sample:", JSON.stringify(data, null, 2).substring(0, 500));
+    
+    // Extract experience data
+    console.log("📊 Experience data:", data.experience);
+    const experience = (data.experience || []).filter((exp: any) => exp && Object.keys(exp).length > 0).map((exp: any) => {
+      console.log("🏢 Processing experience:", exp);
+      return {
+        title: exp.position || exp.title || exp.job_title || "",
+        company: exp.company_name || exp.company || exp.employer || "",
+        location: exp.location || "",
+        startDate: exp.start_date || exp.duration?.split(' - ')[0] || "",
+        endDate: exp.end_date || exp.duration?.split(' - ')[1] || "Present",
+        description: exp.description ? [exp.description] : []
+      };
+    });
+    
+    // Extract education data
+    console.log("🎓 Education data:", data.education);
+    const education = (data.education || []).map((edu: any) => {
+      console.log("🏫 Processing education:", edu);
+      return {
+        degree: edu.college_degree || edu.degree || edu.field_of_study || "",
+        school: edu.college_name || edu.institution || edu.school || "",
+        location: edu.location || "",
+        graduation: edu.college_duration || edu.end_date || edu.duration || "",
+        gpa: edu.gpa || undefined
+      };
+    });
+    
+    // Extract certifications
+    const certifications = (data.certification || []).map((cert: any) => ({
+      name: cert.certification || cert.name || "",
+      issuer: cert.company_name || cert.issuing_organization || "",
+      date: cert.issue_date || cert.date || ""
+    }));
+    
+    // Extract skills from various sources
+    let skills: string[] = [];
+    if (data.skills) {
+      skills = Array.isArray(data.skills) ? data.skills : [];
+    }
+    
+    // Add skills from headline if no explicit skills
+    if (skills.length === 0 && data.headline) {
+      const headlineSkills = extractSkillsFromText(data.headline);
+      skills = headlineSkills;
+    }
+    
+    // Debug logging to see what fields are available
+    console.log("🔍 ScrapingDog data fields:", Object.keys(data));
+    console.log("📋 Name fields - fullName:", data.fullName, "first_name:", data.first_name, "last_name:", data.last_name);
+    
+    // Build name from available fields
+    let name = "Professional Name";
+    if (data.fullName) {
+      name = data.fullName;
+    } else if (data.full_name) {
+      name = data.full_name;
+    } else if (data.first_name && data.last_name) {
+      name = `${data.first_name} ${data.last_name}`;
+    } else if (data.first_name) {
+      name = data.first_name;
+    }
+    
+    const profile: LinkedInProfile = {
+      name: name,
+      headline: data.headline || "Professional Title",
+      location: data.location || "",
+      email: data.email || "",
+      phone: data.phone || "",
+      linkedin: profileUrl,
+      github: data.github_url || "",
+      summary: data.about || data.summary || data.headline || "Professional with expertise in their field.",
+      experience: experience,
+      education: education,
+      skills: skills,
+      certifications: certifications
+    };
+    
+    console.log("✅ Successfully converted ScrapingDog response");
+    return profile;
+    
+  } catch (error) {
+    console.error("Error converting ScrapingDog response:", error);
+    
+    // Return basic profile with available data
+    return {
+      name: data.fullName || data.full_name || "Professional Name",
+      headline: data.headline || "Professional Title",
+      location: data.location || "",
+      email: "",
+      phone: "",
+      linkedin: profileUrl,
+      github: "",
+      summary: data.about || "Professional with expertise in their field.",
+      experience: [],
+      education: [],
+      skills: [],
+      certifications: []
+    };
+  }
+}
+
+/**
+ * Extract skills from text content
+ */
+function extractSkillsFromText(text: string): string[] {
+  const skillKeywords = [
+    // Technical Skills
+    'JavaScript', 'Python', 'Java', 'React', 'Node.js', 'AWS', 'Docker', 'Kubernetes',
+    'HTML', 'CSS', 'TypeScript', 'Angular', 'Vue', 'C++', 'C#', 'PHP', 'Ruby',
+    'Machine Learning', 'Deep Learning', 'Data Science', 'AI', 'Artificial Intelligence',
+    'TensorFlow', 'PyTorch', 'Pandas', 'NumPy', 'Scikit-learn',
+    
+    // Business Skills  
+    'Supply Chain', 'Procurement', 'Strategic Sourcing', 'Project Management',
+    'Leadership', 'Team Management', 'Business Development', 'Sales', 'Marketing',
+    'Data Analysis', 'Business Intelligence', 'Process Improvement',
+    
+    // Other Skills
+    'Communication', 'Problem Solving', 'Critical Thinking', 'Analytics',
+    'Research', 'Design', 'Strategy', 'Operations', 'Finance'
+  ];
+  
+  const extractedSkills = skillKeywords.filter(skill => 
+    text.toLowerCase().includes(skill.toLowerCase())
+  );
+  
+  return extractedSkills;
 }
 
 /**
@@ -279,82 +671,8 @@ function convertBrightDataToProfile(data: any, profileUrl: string): LinkedInProf
 }
 
 /**
- * Get Vedansh Dhawan's profile
+ * Get default profile for any user (generic professional template)
  */
-function getVedanshProfile(profileUrl: string): LinkedInProfile {
-  return {
-    name: "Vedansh Dhawan",
-    headline: "Aspiring Software Engineer | Full-Stack Developer | AI/ML Enthusiast",
-    location: "Vellore, Tamil Nadu, India",
-    email: "vedanshd04@gmail.com",
-    phone: "+91 9599036305",
-    linkedin: profileUrl,
-    github: "github.com/vedansh-dhawan",
-    summary: "Aspiring software engineer with solid experience in full-stack development, AI/ML, and telecom systems. Proficient in Python, Java, C++, and React with hands-on project delivery using modern frameworks and APIs. Successfully interned at Ericsson, automating telecom diagnostics and improving system efficiency. Strong academic background with leadership and cross-functional collaboration experience.",
-    experience: [
-      {
-        title: "Software Intern",
-        company: "Ericsson",
-        location: "Noida, Uttar Pradesh, India",
-        startDate: "May 2024",
-        endDate: "July 2024",
-        description: [
-          "Developed Python-based automation scripts for network diagnostics, reducing manual effort by 40% and improving troubleshooting efficiency by 30%",
-          "Executed over 100 test cases for telecom software validation, improving system reliability and reducing critical bugs by 25%",
-          "Collaborated with cross-functional engineering teams to analyze and optimize mobile network protocols, resulting in 20% faster issue resolution",
-          "Enhanced Linux system administration workflows through scripting, increasing daily telecom task efficiency by 35%",
-          "Accelerated understanding of telecom architecture and network KPIs, contributing to 15% improvement in monitoring accuracy"
-        ]
-      }
-    ],
-    education: [
-      {
-        degree: "Bachelor of Computer Science",
-        school: "VIT Vellore",
-        location: "Vellore, Tamil Nadu",
-        graduation: "Expected 2026",
-        gpa: "9.13"
-      },
-      {
-        degree: "Senior Secondary Education",
-        school: "Delhi Public School, Gurgaon",
-        location: "Gurgaon, Haryana",
-        graduation: "2022",
-        gpa: "90%"
-      }
-    ],
-    skills: [
-      "Python", "Java", "C++", "C", "JavaScript", "TypeScript", "HTML", "CSS",
-      "React.js", "Express.js", "Tailwind CSS", "FastAPI",
-      "MySQL", "PostgreSQL", "Oracle Database", "MongoDB", "SQL", "PL/SQL",
-      "AWS", "EC2", "S3", "Git", "GitHub",
-      "Natural Language Processing", "Machine Learning", "OpenAI API",
-      "Agile", "Scrum", "Microsoft Office"
-    ],
-    certifications: [
-      {
-        name: "AWS Educate: Introduction to Cloud 101",
-        issuer: "Amazon Web Services",
-        date: "2024"
-      },
-      {
-        name: "Data Fundamentals",
-        issuer: "IBM SkillsBuild",
-        date: "2024"
-      },
-      {
-        name: "Microsoft Azure AI Essentials Professional Certificate",
-        issuer: "Microsoft and LinkedIn",
-        date: "2024"
-      },
-      {
-        name: "Prompt Engineering & Programming with OpenAI",
-        issuer: "Columbia+",
-        date: "2024"
-      }
-    ]
-  };
-}
 
 /**
  * Get default profile for other users
@@ -502,16 +820,16 @@ export async function scrapeLinkedInProfile(url: string): Promise<ResumeJson> {
     let profileData: LinkedInProfile | null = null;
     
     // Try scraping services in order of preference
-    // 1. Try ScrapingDog (best for LinkedIn)
-    if (!profileData && SCRAPING_SERVICES.scrapingdog.enabled) {
-      console.log("Attempting to scrape with ScrapingDog...");
-      profileData = await scrapeWithScrapingDog(url);
-    }
-    
-    // 2. Try Bright Data (most reliable but expensive)
+    // 1. Try Bright Data (most reliable and we have API key)
     if (!profileData && SCRAPING_SERVICES.brightdata.enabled) {
       console.log("Attempting to scrape with Bright Data...");
       profileData = await scrapeWithBrightData(url);
+    }
+    
+    // 2. Try ScrapingDog (backup option)
+    if (!profileData && SCRAPING_SERVICES.scrapingdog.enabled) {
+      console.log("Attempting to scrape with ScrapingDog...");
+      profileData = await scrapeWithScrapingDog(url);
     }
     
     // 3. Try ScraperAPI (good backup option)
@@ -522,8 +840,15 @@ export async function scrapeLinkedInProfile(url: string): Promise<ResumeJson> {
     
     // 4. Fall back to mock data if no API is configured or all fail
     if (!profileData) {
-      console.log("No scraping API configured or all APIs failed. Using mock data.");
-      profileData = parseLinkedInHTML("", url);
+      console.log("❌ LinkedIn URL scraping failed - LinkedIn likely blocked the request");
+      console.log("💡 Suggestion: Try using 'Paste LinkedIn Data' option instead");
+      
+      // Create a helpful error response instead of mock data
+      throw new Error(
+        "LinkedIn URL scraping was blocked. " +
+        "Please try the 'Paste LinkedIn Data' option instead - " +
+        "just copy your LinkedIn profile content and paste it for AI extraction!"
+      );
     }
     
     // Convert to resume format
@@ -556,9 +881,7 @@ export async function scrapeLinkedInProfile(url: string): Promise<ResumeJson> {
     
     // Return fallback data on any error
     const username = url.split('/in/')[1]?.split('/')[0]?.toLowerCase() || 'professional';
-    const fallbackProfile = username === 'vedansh-dhawan' || username === 'vedanshdhawan' 
-      ? getVedanshProfile(url)
-      : getDefaultProfile(url, username);
+    const fallbackProfile = getDefaultProfile(url, username);
     
     return convertToResumeJson(fallbackProfile);
   }
